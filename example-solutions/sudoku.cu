@@ -239,7 +239,7 @@ extern "C" bool solveSudokuGPU(SudokuGrid& initial, SudokuGrid& solution) {
 
 // Your existing main function and getNumFilled function remain the same...
 
-int getNumFilled(const int grid[GRID_N]) {
+int getNumFilled(const cell_t grid[GRID_N]) {
     int count = 0;
     for (int i = 0; i < GRID_N; i++) {
         if (grid[i] != 0) count++;
