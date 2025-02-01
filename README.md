@@ -61,7 +61,7 @@ Linear Algebra:
 
 Computer Graphics:
   - [x] [Raytracing](https://cs.stanford.edu/people/eroberts/courses/soco/projects/1997-98/ray-tracing/implementation.html)
-  - [x] [Mandelbrot set](https://mandelbrot.site/)
+  - [x] [Mandelbrot set](https://mathr.co.uk/blog/2021-05-14_deep_zoom_theory_and_practice.html)
   - [ ] [Gaussian Splat Rendering](https://arxiv.org/abs/2308.04079)
   - [ ] [Monte Carlo radiation transport (pdf link)](https://indico.cern.ch/event/1123370/contributions/4715934/attachments/2444331/4188477/02_Monte_Carlo_Basics_2022_ULB.pdf)
 
@@ -82,7 +82,7 @@ Machine Learning:
 
 Data Analysis:
   - [ ] [Histogram](https://developer.nvidia.com/blog/gpu-pro-tip-fast-histograms-using-shared-atomics-maxwell/)
-  - [ ] [Radix sort (pdf link)](https://developer.download.nvidia.com/video/gputechconf/gtc/2020/presentations/s21572-a-faster-radix-sort-implementation.pdf)
+  - [x] [Radix sort (pdf link)](https://developer.download.nvidia.com/video/gputechconf/gtc/2020/presentations/s21572-a-faster-radix-sort-implementation.pdf)
   - [ ] [Clustering (K-means)](https://www.nvidia.com/en-us/glossary/k-means/)
   - [ ] [Graph Analytics](https://www.nvidia.com/en-us/glossary/graph-analytics/)
 
