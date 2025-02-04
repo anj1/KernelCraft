@@ -1,7 +1,35 @@
 import numpy as np
+import ctypes
 from numba import jit
 
-
+# Define ctype type for Vec3
+class Vec3(ctypes.Structure):
+    _fields_ = [
+        ("x", ctypes.c_float),
+        ("y", ctypes.c_float),
+        ("z", ctypes.c_float)
+    ]
+    
+    # function to init from numpy array
+    def __init__(self, arr):
+        self.x = arr[0]
+        self.y = arr[1]
+        self.z = arr[2]
+        
+    def __repr__(self):
+        return f"Vec3({self.x}, {self.y}, {self.z})"
+    
+    # # Add add and sub methods
+    # def __add__(self, other):
+    #     return Vec3([self.x + other.x, self.y + other.y, self.z + other.z])
+    
+    # def __sub__(self, other):
+    #     return Vec3([self.x - other.x, self.y - other.y, self.z - other.z])
+    
+    # # Add scalar multiplication
+    # def __mul__(self, scalar):
+    #     return Vec3([self.x * scalar, self.y * scalar, self.z * scalar])
+    
 @jit(nopython=True)
 def normalize(vector):
     norm = np.sqrt(np.sum(vector**2))

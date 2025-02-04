@@ -8,7 +8,7 @@ import ctypes
 
 from core.compile import compile_lib
 
-from tasks.raytracer.obj import obj_to_triangles
+from tasks.raytracer.ply import load_ply_triangles
 from tasks.raytracer.reference import Vec3, cast_rays, normalize
 
 # Fast conversion function
@@ -38,12 +38,13 @@ def fast_convert_from_vec3(arr):
 
 class BVHData(ctypes.Structure):
     _fields_ = [
+        ("n_nodes", ctypes.c_size_t),
         ("node_mins", ctypes.POINTER(Vec3)),
         ("node_maxs", ctypes.POINTER(Vec3)),
-        ("node_lefts", ctypes.POINTER(ctypes.c_int)),
-        ("node_rights", ctypes.POINTER(ctypes.c_int)),
-        ("node_starts", ctypes.POINTER(ctypes.c_int)),
-        ("node_ends", ctypes.POINTER(ctypes.c_int))
+        ("node_lefts", ctypes.POINTER(ctypes.c_int32)),
+        ("node_rights", ctypes.POINTER(ctypes.c_int32)),
+        ("node_starts", ctypes.POINTER(ctypes.c_int32)),
+        ("node_ends", ctypes.POINTER(ctypes.c_int32))
     ]
 
 def wrapper(raytracer_lib):
@@ -60,7 +61,8 @@ def wrapper(raytracer_lib):
         np.ctypeslib.ndpointer(dtype=np.bool_),
         np.ctypeslib.ndpointer(dtype=Vec3),
         np.ctypeslib.ndpointer(dtype=Vec3),
-        ctypes.c_int
+        ctypes.c_size_t,
+        ctypes.c_size_t
     ]
         
     def cast_rays_gpu(
@@ -73,6 +75,7 @@ def wrapper(raytracer_lib):
         pixel_seeds
     ):
         n_rays = len(ray_origins)
+        n_triangles = len(triangles)//3
         
         direct_colors = np.zeros(n_rays, dtype=Vec3)
         did_hits = np.zeros(n_rays, dtype=np.bool_)
@@ -91,7 +94,8 @@ def wrapper(raytracer_lib):
             did_hits,
             hit_points,
             bounce_dirs,
-            n_rays
+            n_rays,
+            n_triangles
         )
         
         return direct_colors, did_hits, hit_points, bounce_dirs
@@ -106,7 +110,7 @@ def create_rays(width, height, ray_dir, px_seed, aspect_ratio):
             x = (2 * (j + 0.5) / width - 1) * aspect_ratio
             y = 1 - 2 * (i + 0.5) / height
             ray_dir[idx] = normalize(np.array([x, y, 1.]))
-            px_seed[idx] = i * width + j
+            #px_seed[idx] = i * width + j
             idx += 1
 
 class Scene:
@@ -115,17 +119,18 @@ class Scene:
         self.colors = colors
         self.bvh_data = BVH(triangles, max_triangles_in_node).flatten()
     
-    def render(self, width, height, camera_pos, cast_rays_func):
+    def render(self, width, height, camera_pos, cast_rays_func, ray_dir=None):
         
         aspect_ratio = width / height
         
         # Generate all primary rays
         n_rays = width * height
         ray_org = np.tile(camera_pos, (n_rays, 1))
-        ray_dir = np.zeros((n_rays, 3))
         px_seed = np.random.rand(n_rays).astype(np.float32) # TODO: set random seeds
                 
-        create_rays(width, height, ray_dir, px_seed, aspect_ratio)
+        if ray_dir is None:
+            ray_dir = np.zeros((n_rays, 3))
+            create_rays(width, height, ray_dir, px_seed, aspect_ratio)
 
         # convert arrays to Vec3 to remove overhead
         ray_org = fast_convert_to_vec3(ray_org)
@@ -136,28 +141,27 @@ class Scene:
         # convert BVH data to ctypes struct
         # our tuple is:
         # (node_mins, node_maxs, node_lefts, node_rights, node_starts, node_ends)
+        node_mins_v3 = fast_convert_to_vec3(self.bvh_data[1])
+        node_maxs_v3 = fast_convert_to_vec3(self.bvh_data[2])
         bvh_data = BVHData(
-            fast_convert_to_vec3(self.bvh_data[0]).ctypes.data_as(ctypes.POINTER(Vec3)),
-            fast_convert_to_vec3(self.bvh_data[1]).ctypes.data_as(ctypes.POINTER(Vec3)),
-            self.bvh_data[2].ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
-            self.bvh_data[3].ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
-            self.bvh_data[4].ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
-            self.bvh_data[5].ctypes.data_as(ctypes.POINTER(ctypes.c_int))
+            len(node_mins_v3),
+            node_mins_v3.ctypes.data_as(ctypes.POINTER(Vec3)),
+            node_maxs_v3.ctypes.data_as(ctypes.POINTER(Vec3)),
+            self.bvh_data[3].ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+            self.bvh_data[4].ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+            self.bvh_data[5].ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
+            self.bvh_data[6].ctypes.data_as(ctypes.POINTER(ctypes.c_int32))
         )
         
         # Cast all primary rays
-        print("Casting rays")
         primary_colors, did_hits, hit_points, bounce_dirs = cast_rays_func(
             ray_org, ray_dir, triangles, colors, bvh_data, 0, px_seed
         )
-        print(primary_colors[0:3])
         
         primary_colors = fast_convert_from_vec3(primary_colors)
         hit_points = fast_convert_from_vec3(hit_points)
         bounce_dirs = fast_convert_from_vec3(bounce_dirs)
-        
-        print(primary_colors[0:3])
-        
+                
         # Prepare secondary rays where we had hits
         hit_mask = did_hits
         if np.any(hit_mask):
@@ -191,27 +195,40 @@ class Scene:
         return np.clip(final_colors.reshape(height, width, 3), 0, 1)
 
 def eval():
-    tris_ground = obj_to_triangles(open('./tasks/raytracer/assets/ground.obj').read())
-    tris_object = obj_to_triangles(open('./tasks/raytracer/assets/pyramid.obj').read())
+    #tris_ground = obj_to_triangles(open('./tasks/raytracer/assets/ground.obj').read())
+    #tris_object = obj_to_triangles(open('./tasks/raytracer/assets/pyramid.obj').read())
+    #tris_object = obj_to_triangles(open('./tasks/raytracer/assets/cube.obj').read())
     #tris_object = 15*obj_to_triangles(open('./tasks/raytracer/assets/bunny.obj').read())
+    
+    with open('./tasks/raytracer/assets/ground.ply', 'rb') as f:
+        tris_ground = load_ply_triangles(f)
+    
+    with open('./tasks/raytracer/assets/cube.ply', 'rb') as f:
+        tris_object = load_ply_triangles(f)
+        
     tris = np.concatenate([tris_ground, tris_object])
     
     colors_ground = np.array([
-        [0.8, 0.8, 0.8],  # Ground - light gray
-        [0.8, 0.8, 0.8],  # Ground - light gray
+        [1.0, 0.4, 0.4],  # Ground - light gray
+        [0.4, 0.4, 1.0],  # Ground - light gray
     ])
     
-    colors_object = np.array([
-        [0.2, 0.2, 1.0],  # Pyramid - blue
-        [1.0, 0.2, 0.2],  # Pyramid - red
-        [0.2, 1.0, 0.2],  # Pyramid - green
-        [1.0, 1.0, 0.2]   # Pyramid - yellow
-    ])
-    # # array of blue color for the object
+    # colors_object = np.array([
+    #     [1.0, 0.2, 0.2],  # Pyramid - red
+    #     [0.2, 1.0, 0.2],  # Pyramid - green
+    #     [0.2, 0.2, 1.0],  # Pyramid - blue
+    #     [1.0, 1.0, 0.2]   # Pyramid - yellow
+    # ])
+    # # array of yellow color for the object
     # colors_object = np.zeros((len(tris_object), 3))
-    # colors_object[:, 0] = 0.1
-    # colors_object[:, 1] = 0.2
-    # colors_object[:, 2] = 1.0
+    # colors_object[:, 0] = 1.0
+    # colors_object[:, 1] = 1.0
+    # colors_object[:, 2] = 0.2
+    
+    colors_object = np.zeros((len(tris_object), 3))
+    colors_object[:, 0] = 8.0
+    colors_object[:, 1] = 8.0
+    colors_object[:, 2] = 8.0
     
     colors = np.concatenate([colors_ground, colors_object])
 
@@ -228,7 +245,9 @@ def eval():
     # Render the scene
     width, height = 1600, 1200
     print("Rendering scene...")
-    image0 = scene.render(width, height, np.array([0., 1., -3.]), cast_rays_func)
+    camera_pos = np.array([0., 1., -3.])
+    image0 = scene.render(width, height, camera_pos, cast_rays_func)
+    image_accum = np.clip(image0, 0, 1)
     #print("Rescene.ndering scene...")
     #image1 = scene.render(width, height, np.array([0., 1.2, -3.]))
 
@@ -241,6 +260,23 @@ def eval():
     # Save the result
     plt.imsave('raytracing0.png', image0)
     #plt.imsave('raytracing1.png', image1)
+    
+    # Now render 100 times and average
+    print("Rendering scene 100 times...")
+    image_accum = np.zeros((height, width, 3), dtype=np.float32)
+    for i in range(128):
+        n_rays = width * height
+        ray_dir = np.zeros((n_rays, 3))
+        px_seed = np.random.rand(n_rays).astype(np.float32) # TODO: set random seeds  
+        create_rays(width, height, ray_dir, px_seed, width / height)
+        # randomly perturb ray direction for anti-aliasing
+        ray_dir += np.random.uniform(-0.001, 0.001, (n_rays, 3))
+        image_accum += scene.render(width, height, np.array([0., 1., -3.]), cast_rays_func, ray_dir)
+    image_accum *= (1.0/128.0)
+    # clip to 0-1 range
+    image_accum = np.clip(image_accum, 0, 1)
+    
+    plt.imsave('raytracing1.png', image_accum)
     
 if __name__ == "__main__":
     eval()

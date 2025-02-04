@@ -24,12 +24,13 @@ struct Vec3 {
 };
 
 struct BVHData {
+    size_t n_nodes;
     Vec3* node_mins;
     Vec3* node_maxs;
-    int* node_lefts;
-    int* node_rights;
-    int* node_starts;
-    int* node_ends;
+    int32_t* node_lefts;
+    int32_t* node_rights;
+    int32_t* node_starts;
+    int32_t* node_ends;
 };
 
 __device__ float dot(const Vec3& a, const Vec3& b) {
@@ -128,8 +129,8 @@ __device__ bool triangle_intersect(const Vec3& v0, const Vec3& v1, const Vec3& v
 
 __device__ bool intersect_bvh_node(const Vec3& ray_origin, const Vec3& ray_direction,
                                  const Vec3* triangles, const Vec3* colors,
-                                 const BVHData& bvh, int node_idx,
-                                 float& closest_t, Vec3& closest_normal, Vec3& closest_color) {
+                                 const BVHData& bvh, int32_t node_idx,
+                                 float& closest_t, Vec3& closest_normal, Vec3& closest_color) {    
     if (!aabb_intersect(ray_origin, ray_direction, 
                        bvh.node_mins[node_idx], bvh.node_maxs[node_idx])) {
         return false;
@@ -139,7 +140,7 @@ __device__ bool intersect_bvh_node(const Vec3& ray_origin, const Vec3& ray_direc
         bool hit = false;
         closest_t = CUDART_INF_F;
         
-        for (int i = bvh.node_starts[node_idx]; i < bvh.node_ends[node_idx]; i++) {
+        for (int32_t i = bvh.node_starts[node_idx]; i < bvh.node_ends[node_idx]; i++) {
             float t;
             Vec3 normal;
             if (triangle_intersect(triangles[i * 3], triangles[i * 3 + 1], triangles[i * 3 + 2],
@@ -190,7 +191,7 @@ __global__ void cast_rays_kernel(
     bool* did_hits,
     Vec3* hit_points,
     Vec3* bounce_dirs,
-    int n_rays
+    size_t n_rays
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n_rays) return;
@@ -259,7 +260,8 @@ extern "C" void launchCastRays(
     bool* did_hits,
     Vec3* hit_points,
     Vec3* bounce_dirs,
-    int n_rays
+    size_t n_rays,
+    size_t n_triangles
 ) {
     int threads_per_block = 256;
     int blocks = (n_rays + threads_per_block - 1) / threads_per_block;
@@ -276,44 +278,52 @@ extern "C" void launchCastRays(
 
     Vec3* node_mins;
     Vec3* node_maxs;
-    int* node_lefts;
-    int* node_rights;
-    int* node_starts;
-    int* node_ends;
+    int32_t* node_lefts;
+    int32_t* node_rights;
+    int32_t* node_starts;
+    int32_t* node_ends;
 
     // Allocate memory 
     cudaMalloc(&d_ray_origins, n_rays * sizeof(Vec3));
     cudaMalloc(&d_ray_directions, n_rays * sizeof(Vec3));
-    cudaMalloc(&d_triangles, 3 * bvh.node_ends[0] * sizeof(Vec3));
-    cudaMalloc(&d_colors, bvh.node_ends[0] * sizeof(Vec3));
+    cudaMalloc(&d_triangles, 3 * n_triangles * sizeof(Vec3));
+    cudaMalloc(&d_colors, n_triangles * sizeof(Vec3));
     cudaMalloc(&d_direct_colors, n_rays * sizeof(Vec3));
     cudaMalloc(&d_did_hits, n_rays * sizeof(bool));
     cudaMalloc(&d_hit_points, n_rays * sizeof(Vec3));
     cudaMalloc(&d_bounce_dirs, n_rays * sizeof(Vec3));
     cudaMalloc(&d_pixel_seeds, n_rays * sizeof(float));
 
-    cudaMalloc(&node_mins, bvh.node_ends[0] * sizeof(Vec3));
-    cudaMalloc(&node_maxs, bvh.node_ends[0] * sizeof(Vec3));
-    cudaMalloc(&node_lefts, bvh.node_ends[0] * sizeof(int));
-    cudaMalloc(&node_rights, bvh.node_ends[0] * sizeof(int));
-    cudaMalloc(&node_starts, bvh.node_ends[0] * sizeof(int));
-    cudaMalloc(&node_ends, bvh.node_ends[0] * sizeof(int));
+    cudaMalloc(&node_mins, bvh.n_nodes * sizeof(Vec3));
+    cudaMalloc(&node_maxs, bvh.n_nodes * sizeof(Vec3));
+    cudaMalloc(&node_lefts, bvh.n_nodes * sizeof(int32_t));
+    cudaMalloc(&node_rights, bvh.n_nodes * sizeof(int32_t));
+    cudaMalloc(&node_starts, bvh.n_nodes * sizeof(int32_t));
+    cudaMalloc(&node_ends, bvh.n_nodes * sizeof(int32_t));
 
     // Copy data to device
     cudaMemcpy(d_ray_origins, ray_origins, n_rays * sizeof(Vec3), cudaMemcpyHostToDevice);
     cudaMemcpy(d_ray_directions, ray_directions, n_rays * sizeof(Vec3), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_triangles, triangles, 3 * bvh.node_ends[0] * sizeof(Vec3), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_colors, colors, bvh.node_ends[0] * sizeof(Vec3), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_triangles, triangles, 3 * n_triangles * sizeof(Vec3), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_colors, colors, n_triangles * sizeof(Vec3), cudaMemcpyHostToDevice);
     cudaMemcpy(d_pixel_seeds, pixel_seeds, n_rays * sizeof(float), cudaMemcpyHostToDevice);
 
-    cudaMemcpy(node_mins, bvh.node_mins, bvh.node_ends[0] * sizeof(Vec3), cudaMemcpyHostToDevice);
-    cudaMemcpy(node_maxs, bvh.node_maxs, bvh.node_ends[0] * sizeof(Vec3), cudaMemcpyHostToDevice);
-    cudaMemcpy(node_lefts, bvh.node_lefts, bvh.node_ends[0] * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(node_rights, bvh.node_rights, bvh.node_ends[0] * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(node_starts, bvh.node_starts, bvh.node_ends[0] * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(node_ends, bvh.node_ends, bvh.node_ends[0] * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(node_mins, bvh.node_mins, bvh.n_nodes * sizeof(Vec3), cudaMemcpyHostToDevice);
+    cudaMemcpy(node_maxs, bvh.node_maxs, bvh.n_nodes * sizeof(Vec3), cudaMemcpyHostToDevice);
+    cudaMemcpy(node_lefts, bvh.node_lefts, bvh.n_nodes * sizeof(int32_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(node_rights, bvh.node_rights, bvh.n_nodes * sizeof(int32_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(node_starts, bvh.node_starts, bvh.n_nodes * sizeof(int32_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(node_ends, bvh.node_ends, bvh.n_nodes * sizeof(int32_t), cudaMemcpyHostToDevice);
 
-    BVHData d_bvh = {node_mins, node_maxs, node_lefts, node_rights, node_starts, node_ends};
+    BVHData d_bvh = {
+        bvh.n_nodes,
+        node_mins,
+        node_maxs,
+        node_lefts,
+        node_rights,
+        node_starts,
+        node_ends
+    };
 
     cast_rays_kernel<<<blocks, threads_per_block>>>(
         d_ray_origins, d_ray_directions, d_triangles, d_colors,
@@ -351,5 +361,4 @@ extern "C" void launchCastRays(
     cudaFree(node_lefts);
     cudaFree(node_rights);
     cudaFree(node_starts);
-    cudaFree(node_ends);
 }

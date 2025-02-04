@@ -108,9 +108,17 @@ class BVH:
         
         node_mins = np.array([node.aabb.min_bound for node in nodes])
         node_maxs = np.array([node.aabb.max_bound for node in nodes])
-        node_lefts = np.array([node.left_idx for node in nodes])
-        node_rights = np.array([node.right_idx for node in nodes])
-        node_starts = np.array([node.start for node in nodes])
-        node_ends = np.array([node.end for node in nodes])
+        node_lefts = np.array([node.left_idx for node in nodes]).astype(np.int32)
+        node_rights = np.array([node.right_idx for node in nodes]).astype(np.int32)
+        node_starts = np.array([node.start for node in nodes]).astype(np.int32)
+        node_ends = np.array([node.end for node in nodes]).astype(np.int32)
         
-        return (node_mins, node_maxs, node_lefts, node_rights, node_starts, node_ends)
+        return (
+            len(nodes),
+            node_mins,
+            node_maxs,
+            node_lefts,
+            node_rights,
+            node_starts,
+            node_ends
+        )
