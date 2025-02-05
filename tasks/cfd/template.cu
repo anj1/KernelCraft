@@ -13,39 +13,6 @@ struct GPUResources {
     dim3 gridDim;
 };
 
-// GPU kernel for calculating macroscopic variables
-// Only used for testing, not part of the main simulation
-__global__ void calculateMacroscopicKernel(float* fluid, float* rho, float* ux, float* uy,
-                                         const int* cxs, const int* cys, int Nx, int Ny, int NL) {
-    // TODO...
-}
-
-// Combined macroscopic and collision kernel
-__global__ void macroAndCollisionKernel(
-    float* fluid, float* fluid_new,
-    const int* cxs, const int* cys, const float* weights,
-    float tau, int Nx, int Ny, int NL) {
-
-    // TODO...
-}
-
-// Optimized drift kernel with coalesced access
-__global__ void driftKernel(
-    float* dst, const float* src,
-    const int* cxs, const int* cys,
-    int Nx, int Ny, int NL) {
-
-    // TODO...
-}
-
-// GPU kernel for bounce-back operation
-__global__ void bounceBackKernel(float* fluid, float* fluid_orig, const bool* obstacle, int Nx, int Ny, int NL) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    
-    // TODO...
-}
-
 // Initialization function with data layout transformation
 extern "C" GPUResources* initialize_gpu(
     const float* h_fluid,
@@ -59,6 +26,15 @@ extern "C" GPUResources* initialize_gpu(
 
     // TODO: Allocate memory and set grid and block dimensions optimally...
 }
+
+// GPU kernel for calculating macroscopic variables
+// Only used for testing, not part of the main simulation
+__global__ void calculateMacroscopicKernel(float* fluid, float* rho, float* ux, float* uy,
+                                         const int* cxs, const int* cys, int Nx, int Ny, int NL) {
+    // TODO...
+}
+
+// TODO: Implement fluid simulation kernel function(s)...
 
 // Simulation step using optimized kernels
 extern "C" void simulation_step(GPUResources* res, float tau, int Nx, int Ny, int NL) {

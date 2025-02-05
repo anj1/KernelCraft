@@ -203,7 +203,7 @@ def eval():
     with open('./tasks/raytracer/assets/ground.ply', 'rb') as f:
         tris_ground = load_ply_triangles(f)
     
-    with open('./tasks/raytracer/assets/cube.ply', 'rb') as f:
+    with open('./tasks/raytracer/assets/sphere.ply', 'rb') as f:
         tris_object = load_ply_triangles(f)
         
     tris = np.concatenate([tris_ground, tris_object])
