@@ -3,13 +3,12 @@ import numpy as np
 import numpy.typing as npt 
 import matplotlib.pyplot as plt
 from tasks.raytracer.bvh import BVH
-from numba import jit
 import ctypes 
 
 from core.compile import compile_lib
 
 from tasks.raytracer.ply import load_ply_triangles
-from tasks.raytracer.reference import Vec3, cast_rays, normalize
+from tasks.raytracer.reference import Vec3, cast_rays
 
 # Fast conversion function
 def fast_convert_to_vec3(arr):
@@ -102,16 +101,17 @@ def wrapper(raytracer_lib):
 
     return cast_rays_gpu
 
-@jit(nopython=True)
-def create_rays(width, height, ray_dir, px_seed, aspect_ratio):
-    idx = 0
-    for i in range(height):
-        for j in range(width):
-            x = (2 * (j + 0.5) / width - 1) * aspect_ratio
-            y = 1 - 2 * (i + 0.5) / height
-            ray_dir[idx] = normalize(np.array([x, y, 1.]))
-            #px_seed[idx] = i * width + j
-            idx += 1
+def create_rays_vectorized(width, height, aspect_ratio):
+    # Create coordinate grids
+    x = np.linspace(0.5/width, 1 - 0.5/width, width) * 2 - 1
+    y = np.linspace(1 - 0.5/height, 0.5/height, height) * 2 - 1
+    
+    xx, yy = np.meshgrid(x * aspect_ratio, y)
+    
+    rays = np.stack([xx.ravel(), yy.ravel(), np.ones(width * height)], axis=1)
+    rays /= np.linalg.norm(rays, axis=1)[:, np.newaxis]
+    
+    return rays
 
 class Scene:
     def __init__(self, triangles, colors, max_triangles_in_node=8):
@@ -129,8 +129,9 @@ class Scene:
         px_seed = np.random.rand(n_rays).astype(np.float32) # TODO: set random seeds
                 
         if ray_dir is None:
-            ray_dir = np.zeros((n_rays, 3))
-            create_rays(width, height, ray_dir, px_seed, aspect_ratio)
+            #ray_dir = np.zeros((n_rays, 3))
+            #create_rays(width, height, ray_dir, aspect_ratio)
+            ray_dir = create_rays_vectorized(width, height, aspect_ratio)
 
         # convert arrays to Vec3 to remove overhead
         ray_org = fast_convert_to_vec3(ray_org)
@@ -203,9 +204,13 @@ def eval():
     with open('./tasks/raytracer/assets/ground.ply', 'rb') as f:
         tris_ground = load_ply_triangles(f)
     
-    with open('./tasks/raytracer/assets/sphere.ply', 'rb') as f:
-        tris_object = load_ply_triangles(f)
+    with open('./tasks/raytracer/assets/bunny.ply', 'rb') as f:
+        #tris_object = load_ply_triangles(f)
+        tris_object = 15*load_ply_triangles(f)*[1,-1,1] 
         
+    # translate object so that it sits on the ground plane
+    tris_object += np.array([0, -np.min(tris_object[:, 1])-2, 0])
+    
     tris = np.concatenate([tris_ground, tris_object])
     
     colors_ground = np.array([
@@ -213,26 +218,14 @@ def eval():
         [0.4, 0.4, 1.0],  # Ground - light gray
     ])
     
-    # colors_object = np.array([
-    #     [1.0, 0.2, 0.2],  # Pyramid - red
-    #     [0.2, 1.0, 0.2],  # Pyramid - green
-    #     [0.2, 0.2, 1.0],  # Pyramid - blue
-    #     [1.0, 1.0, 0.2]   # Pyramid - yellow
-    # ])
-    # # array of yellow color for the object
-    # colors_object = np.zeros((len(tris_object), 3))
-    # colors_object[:, 0] = 1.0
-    # colors_object[:, 1] = 1.0
-    # colors_object[:, 2] = 0.2
-    
     colors_object = np.zeros((len(tris_object), 3))
-    colors_object[:, 0] = 8.0
-    colors_object[:, 1] = 8.0
-    colors_object[:, 2] = 8.0
+    colors_object[:, 0] = 1.0
+    colors_object[:, 1] = 1.0
+    colors_object[:, 2] = 1.0
     
     colors = np.concatenate([colors_ground, colors_object])
 
-    scene = Scene(tris, colors)
+    scene = Scene(tris, colors, max_triangles_in_node=8)
 
     # gpu library 
     lib = compile_lib('./example-solutions/raytracer.cu')
@@ -241,6 +234,7 @@ def eval():
         return
     
     cast_rays_func = wrapper(lib)
+    #cast_rays_func = cast_rays
     
     # Render the scene
     width, height = 1600, 1200
@@ -266,9 +260,10 @@ def eval():
     image_accum = np.zeros((height, width, 3), dtype=np.float32)
     for i in range(128):
         n_rays = width * height
-        ray_dir = np.zeros((n_rays, 3))
+        #ray_dir = np.zeros((n_rays, 3))
         px_seed = np.random.rand(n_rays).astype(np.float32) # TODO: set random seeds  
-        create_rays(width, height, ray_dir, px_seed, width / height)
+        #create_rays(width, height, ray_dir, width / height)
+        ray_dir = create_rays_vectorized(width, height, width / height)
         # randomly perturb ray direction for anti-aliasing
         ray_dir += np.random.uniform(-0.001, 0.001, (n_rays, 3))
         image_accum += scene.render(width, height, np.array([0., 1., -3.]), cast_rays_func, ray_dir)

@@ -127,57 +127,136 @@ __device__ bool triangle_intersect(const Vec3& v0, const Vec3& v1, const Vec3& v
     return true;
 }
 
+// Helper function to get minimum intersection distance with AABB
+__device__ float aabb_intersection_distance(const Vec3& ray_origin, const Vec3& ray_direction,
+                                          const Vec3& aabb_min, const Vec3& aabb_max) {
+    float t_min = 0.0f;
+    float t_max = CUDART_INF_F;
+    
+    // X axis intersection
+    float t1 = (aabb_min.x - ray_origin.x) / ray_direction.x;
+    float t2 = (aabb_max.x - ray_origin.x) / ray_direction.x;
+    if (ray_direction.x < 0.0f) {
+        float temp = t1;
+        t1 = t2;
+        t2 = temp;
+    }
+    t_min = max(t_min, t1);
+    t_max = min(t_max, t2);
+    
+    // Y axis intersection
+    t1 = (aabb_min.y - ray_origin.y) / ray_direction.y;
+    t2 = (aabb_max.y - ray_origin.y) / ray_direction.y;
+    if (ray_direction.y < 0.0f) {
+        float temp = t1;
+        t1 = t2;
+        t2 = temp;
+    }
+    t_min = max(t_min, t1);
+    t_max = min(t_max, t2);
+    
+    // Z axis intersection
+    t1 = (aabb_min.z - ray_origin.z) / ray_direction.z;
+    t2 = (aabb_max.z - ray_origin.z) / ray_direction.z;
+    if (ray_direction.z < 0.0f) {
+        float temp = t1;
+        t1 = t2;
+        t2 = temp;
+    }
+    t_min = max(t_min, t1);
+    t_max = min(t_max, t2);
+    
+    return (t_max >= t_min) ? t_min : CUDART_INF_F;
+}
+
+// Stack entry for BVH traversal
+struct StackEntry {
+    int32_t node_idx;
+    float t_min;  // Used for sorting traversal order
+};
+
 __device__ bool intersect_bvh_node(const Vec3& ray_origin, const Vec3& ray_direction,
                                  const Vec3* triangles, const Vec3* colors,
-                                 const BVHData& bvh, int32_t node_idx,
-                                 float& closest_t, Vec3& closest_normal, Vec3& closest_color) {    
-    if (!aabb_intersect(ray_origin, ray_direction, 
-                       bvh.node_mins[node_idx], bvh.node_maxs[node_idx])) {
-        return false;
-    }
+                                 const BVHData& bvh, int32_t root_idx,
+                                 float& closest_t, Vec3& closest_normal, Vec3& closest_color) {
+    // Stack for iterative traversal - adjust size based on your BVH depth
+    constexpr int MAX_STACK = 64;
+    StackEntry stack[MAX_STACK];
+    int stack_ptr = 0;
     
-    if (bvh.node_lefts[node_idx] == -1) {
-        bool hit = false;
-        closest_t = CUDART_INF_F;
+    bool hit_anything = false;
+    closest_t = CUDART_INF_F;
+    
+    // Push root node
+    stack[stack_ptr++] = {root_idx, 0.0f};
+    
+    while (stack_ptr > 0) {
+        // Pop node from stack
+        StackEntry current = stack[--stack_ptr];
+        int32_t node_idx = current.node_idx;
         
-        for (int32_t i = bvh.node_starts[node_idx]; i < bvh.node_ends[node_idx]; i++) {
-            float t;
-            Vec3 normal;
-            if (triangle_intersect(triangles[i * 3], triangles[i * 3 + 1], triangles[i * 3 + 2],
-                                 ray_origin, ray_direction, t, normal)) {
-                if (t < closest_t) {
-                    closest_t = t;
-                    closest_normal = normal;
-                    closest_color = colors[i];
-                    hit = true;
+        // Skip if we already found something closer
+        if (current.t_min >= closest_t) {
+            continue;
+        }
+        
+        // Test AABB intersection
+        if (!aabb_intersect(ray_origin, ray_direction, 
+                          bvh.node_mins[node_idx], bvh.node_maxs[node_idx])) {
+            continue;
+        }
+        
+        // Leaf node - test triangles
+        if (bvh.node_lefts[node_idx] == -1) {
+            for (int32_t i = bvh.node_starts[node_idx]; i < bvh.node_ends[node_idx]; i++) {
+                float t;
+                Vec3 normal;
+                if (triangle_intersect(triangles[i * 3], triangles[i * 3 + 1], triangles[i * 3 + 2],
+                                     ray_origin, ray_direction, t, normal)) {
+                    if (t < closest_t) {
+                        closest_t = t;
+                        closest_normal = normal;
+                        closest_color = colors[i];
+                        hit_anything = true;
+                    }
                 }
             }
+            continue;
         }
-        return hit;
+        
+        // Internal node - push children
+        int32_t left_idx = bvh.node_lefts[node_idx];
+        int32_t right_idx = bvh.node_rights[node_idx];
+        
+        // Calculate distances to child AABBs for traversal order
+        float t_left = aabb_intersection_distance(ray_origin, ray_direction, 
+                                                bvh.node_mins[left_idx], 
+                                                bvh.node_maxs[left_idx]);
+        float t_right = aabb_intersection_distance(ray_origin, ray_direction, 
+                                                 bvh.node_mins[right_idx], 
+                                                 bvh.node_maxs[right_idx]);
+        
+        // Push nodes in far-to-near order (stack is LIFO)
+        if (t_left < t_right) {
+            if (t_right < CUDART_INF_F && stack_ptr < MAX_STACK) {
+                stack[stack_ptr++] = {right_idx, t_right};
+            }
+            if (t_left < CUDART_INF_F && stack_ptr < MAX_STACK) {
+                stack[stack_ptr++] = {left_idx, t_left};
+            }
+        } else {
+            if (t_left < CUDART_INF_F && stack_ptr < MAX_STACK) {
+                stack[stack_ptr++] = {left_idx, t_left};
+            }
+            if (t_right < CUDART_INF_F && stack_ptr < MAX_STACK) {
+                stack[stack_ptr++] = {right_idx, t_right};
+            }
+        }
     }
     
-    float t1 = CUDART_INF_F, t2 = CUDART_INF_F;
-    Vec3 n1, n2, c1, c2;
-    bool hit1 = intersect_bvh_node(ray_origin, ray_direction, triangles, colors,
-                                  bvh, bvh.node_lefts[node_idx],
-                                  t1, n1, c1);
-    bool hit2 = intersect_bvh_node(ray_origin, ray_direction, triangles, colors,
-                                  bvh, bvh.node_rights[node_idx],
-                                  t2, n2, c2);
-                                  
-    if (!hit1 && !hit2) return false;
-    
-    if (t1 < t2) {
-        closest_t = t1;
-        closest_normal = n1;
-        closest_color = c1;
-    } else {
-        closest_t = t2;
-        closest_normal = n2;
-        closest_color = c2;
-    }
-    return true;
+    return hit_anything;
 }
+
 
 __global__ void cast_rays_kernel(
     Vec3* ray_origins,
