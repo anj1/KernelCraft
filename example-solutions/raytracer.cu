@@ -4,6 +4,8 @@
 #include <math.h>
 #include <iostream> 
 
+
+
 struct Vec3 {
     float x, y, z;
     
@@ -32,6 +34,21 @@ struct BVHData {
     int32_t* node_starts;
     int32_t* node_ends;
 };
+
+// Struct to hold all GPU resources
+struct GPUResources {
+    Vec3 *ray_origins;
+    Vec3 *ray_directions;
+    Vec3 *triangles;
+    Vec3 *colors;
+    BVHData bvh;
+    float *pixel_seeds;
+    Vec3 *direct_colors;
+    bool *did_hits;
+    Vec3 *hit_points;
+    Vec3 *bounce_dirs;
+};
+
 
 __device__ float dot(const Vec3& a, const Vec3& b) {
     return a.x * b.x + a.y * b.y + a.z * b.z;
@@ -328,6 +345,7 @@ __global__ void cast_rays_kernel(
 
 // Host function to launch the kernel
 extern "C" void launchCastRays(
+    GPUResources *res,
     Vec3* ray_origins,
     Vec3* ray_directions,
     Vec3* triangles,
@@ -340,104 +358,131 @@ extern "C" void launchCastRays(
     Vec3* hit_points,
     Vec3* bounce_dirs,
     size_t n_rays,
-    size_t n_triangles
-) {
+    size_t n_triangles)
+{
     int threads_per_block = 256;
     int blocks = (n_rays + threads_per_block - 1) / threads_per_block;
     
-    Vec3* d_ray_origins;
-    Vec3* d_ray_directions;
-    Vec3* d_triangles;
-    Vec3* d_colors;
-    Vec3* d_direct_colors;
-    bool* d_did_hits;
-    Vec3* d_hit_points;
-    Vec3* d_bounce_dirs;
-    float* d_pixel_seeds;
-
-    Vec3* node_mins;
-    Vec3* node_maxs;
-    int32_t* node_lefts;
-    int32_t* node_rights;
-    int32_t* node_starts;
-    int32_t* node_ends;
-
-    // Allocate memory 
-    cudaMalloc(&d_ray_origins, n_rays * sizeof(Vec3));
-    cudaMalloc(&d_ray_directions, n_rays * sizeof(Vec3));
-    cudaMalloc(&d_triangles, 3 * n_triangles * sizeof(Vec3));
-    cudaMalloc(&d_colors, n_triangles * sizeof(Vec3));
-    cudaMalloc(&d_direct_colors, n_rays * sizeof(Vec3));
-    cudaMalloc(&d_did_hits, n_rays * sizeof(bool));
-    cudaMalloc(&d_hit_points, n_rays * sizeof(Vec3));
-    cudaMalloc(&d_bounce_dirs, n_rays * sizeof(Vec3));
-    cudaMalloc(&d_pixel_seeds, n_rays * sizeof(float));
-
-    cudaMalloc(&node_mins, bvh.n_nodes * sizeof(Vec3));
-    cudaMalloc(&node_maxs, bvh.n_nodes * sizeof(Vec3));
-    cudaMalloc(&node_lefts, bvh.n_nodes * sizeof(int32_t));
-    cudaMalloc(&node_rights, bvh.n_nodes * sizeof(int32_t));
-    cudaMalloc(&node_starts, bvh.n_nodes * sizeof(int32_t));
-    cudaMalloc(&node_ends, bvh.n_nodes * sizeof(int32_t));
-
     // Copy data to device
-    cudaMemcpy(d_ray_origins, ray_origins, n_rays * sizeof(Vec3), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_ray_directions, ray_directions, n_rays * sizeof(Vec3), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_triangles, triangles, 3 * n_triangles * sizeof(Vec3), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_colors, colors, n_triangles * sizeof(Vec3), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_pixel_seeds, pixel_seeds, n_rays * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(res->ray_origins, ray_origins, n_rays * sizeof(Vec3), cudaMemcpyHostToDevice);
+    cudaMemcpy(res->ray_directions, ray_directions, n_rays * sizeof(Vec3), cudaMemcpyHostToDevice);
+    cudaMemcpy(res->triangles, triangles, 3 * n_triangles * sizeof(Vec3), cudaMemcpyHostToDevice);
+    cudaMemcpy(res->colors, colors, n_triangles * sizeof(Vec3), cudaMemcpyHostToDevice);
+    cudaMemcpy(res->pixel_seeds, pixel_seeds, n_rays * sizeof(float), cudaMemcpyHostToDevice);
 
-    cudaMemcpy(node_mins, bvh.node_mins, bvh.n_nodes * sizeof(Vec3), cudaMemcpyHostToDevice);
-    cudaMemcpy(node_maxs, bvh.node_maxs, bvh.n_nodes * sizeof(Vec3), cudaMemcpyHostToDevice);
-    cudaMemcpy(node_lefts, bvh.node_lefts, bvh.n_nodes * sizeof(int32_t), cudaMemcpyHostToDevice);
-    cudaMemcpy(node_rights, bvh.node_rights, bvh.n_nodes * sizeof(int32_t), cudaMemcpyHostToDevice);
-    cudaMemcpy(node_starts, bvh.node_starts, bvh.n_nodes * sizeof(int32_t), cudaMemcpyHostToDevice);
-    cudaMemcpy(node_ends, bvh.node_ends, bvh.n_nodes * sizeof(int32_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(res->bvh.node_mins, bvh.node_mins, bvh.n_nodes * sizeof(Vec3), cudaMemcpyHostToDevice);
+    cudaMemcpy(res->bvh.node_maxs, bvh.node_maxs, bvh.n_nodes * sizeof(Vec3), cudaMemcpyHostToDevice);
+    cudaMemcpy(res->bvh.node_lefts, bvh.node_lefts, bvh.n_nodes * sizeof(int32_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(res->bvh.node_rights, bvh.node_rights, bvh.n_nodes * sizeof(int32_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(res->bvh.node_starts, bvh.node_starts, bvh.n_nodes * sizeof(int32_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(res->bvh.node_ends, bvh.node_ends, bvh.n_nodes * sizeof(int32_t), cudaMemcpyHostToDevice);
 
-    BVHData d_bvh = {
-        bvh.n_nodes,
-        node_mins,
-        node_maxs,
-        node_lefts,
-        node_rights,
-        node_starts,
-        node_ends
-    };
+    // If there are any errors, print them to stdout
+    cudaError_t error;
+    error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        std::cerr << "CUDA error during cudaMemcpy: " << cudaGetErrorString(error) << std::endl;
+        return;
+    }
 
     cast_rays_kernel<<<blocks, threads_per_block>>>(
-        d_ray_origins, d_ray_directions, d_triangles, d_colors,
-        d_bvh, depth, d_pixel_seeds, d_direct_colors,
-        d_did_hits, d_hit_points, d_bounce_dirs, n_rays
+        res->ray_origins,
+        res->ray_directions,
+        res->triangles,
+        res->colors,
+        res->bvh,
+        depth,
+        res->pixel_seeds,
+        res->direct_colors,
+        res->did_hits, 
+        res->hit_points,
+        res->bounce_dirs,
+        n_rays
     );
 
     cudaDeviceSynchronize();
 
     // If there are any errors, print them to stdout
-    cudaError_t error = cudaGetLastError();
+    error = cudaGetLastError();
     if (error != cudaSuccess) {
         std::cerr << "CUDA error: " << cudaGetErrorString(error) << std::endl;
     } else {
         // Copy result back to host
-        cudaMemcpy(direct_colors, d_direct_colors, n_rays * sizeof(Vec3), cudaMemcpyDeviceToHost);
-        cudaMemcpy(did_hits, d_did_hits, n_rays * sizeof(bool), cudaMemcpyDeviceToHost);
-        cudaMemcpy(hit_points, d_hit_points, n_rays * sizeof(Vec3), cudaMemcpyDeviceToHost);
-        cudaMemcpy(bounce_dirs, d_bounce_dirs, n_rays * sizeof(Vec3), cudaMemcpyDeviceToHost);
+        cudaMemcpy(direct_colors, res->direct_colors, n_rays * sizeof(Vec3), cudaMemcpyDeviceToHost);
+        cudaMemcpy(did_hits, res->did_hits, n_rays * sizeof(bool), cudaMemcpyDeviceToHost);
+        cudaMemcpy(hit_points, res->hit_points, n_rays * sizeof(Vec3), cudaMemcpyDeviceToHost);
+        cudaMemcpy(bounce_dirs, res->bounce_dirs, n_rays * sizeof(Vec3), cudaMemcpyDeviceToHost);
     }
+}
 
-    // Free device memory
-    cudaFree(d_ray_origins);
-    cudaFree(d_ray_directions);
-    cudaFree(d_triangles);
-    cudaFree(d_colors);
-    cudaFree(d_direct_colors);
-    cudaFree(d_did_hits);
-    cudaFree(d_hit_points);
-    cudaFree(d_bounce_dirs);
-    cudaFree(d_pixel_seeds);
+extern "C" void *initialize_gpu(
+    size_t n_rays,
+    size_t n_triangles,
+    size_t n_bvh_nodes
+    ) {
+    // Allocate memory on device
+    GPUResources *res = new GPUResources;
 
-    cudaFree(node_mins);
-    cudaFree(node_maxs);
-    cudaFree(node_lefts);
-    cudaFree(node_rights);
-    cudaFree(node_starts);
+    cudaMalloc(&res->ray_origins, n_rays * sizeof(Vec3));
+    cudaMalloc(&res->ray_directions, n_rays * sizeof(Vec3));
+    cudaMalloc(&res->triangles, 3 * n_triangles * sizeof(Vec3));
+    cudaMalloc(&res->colors, n_triangles * sizeof(Vec3));
+    cudaMalloc(&res->pixel_seeds, n_rays * sizeof(float));
+    cudaMalloc(&res->direct_colors, n_rays * sizeof(Vec3));
+    cudaMalloc(&res->did_hits, n_rays * sizeof(bool));
+    cudaMalloc(&res->hit_points, n_rays * sizeof(Vec3));
+    cudaMalloc(&res->bounce_dirs, n_rays * sizeof(Vec3));
+
+    res->bvh.n_nodes = n_bvh_nodes;
+    cudaMalloc(&res->bvh.node_mins, n_bvh_nodes * sizeof(Vec3));
+    cudaMalloc(&res->bvh.node_maxs, n_bvh_nodes * sizeof(Vec3));
+    cudaMalloc(&res->bvh.node_lefts, n_bvh_nodes * sizeof(int32_t));
+    cudaMalloc(&res->bvh.node_rights, n_bvh_nodes * sizeof(int32_t));
+    cudaMalloc(&res->bvh.node_starts, n_bvh_nodes * sizeof(int32_t));
+    cudaMalloc(&res->bvh.node_ends, n_bvh_nodes * sizeof(int32_t));
+
+    // Confirm that all allocations succeeded
+    if (res->ray_origins == NULL ||
+        res->ray_directions == NULL ||
+        res->triangles == NULL ||
+        res->colors == NULL ||
+        res->pixel_seeds == NULL ||
+        res->direct_colors == NULL ||
+        res->did_hits == NULL ||
+        res->hit_points == NULL ||
+        res->bounce_dirs == NULL ||
+        res->bvh.node_mins == NULL ||
+        res->bvh.node_maxs == NULL ||
+        res->bvh.node_lefts == NULL ||
+        res->bvh.node_rights == NULL ||
+        res->bvh.node_starts == NULL ||
+        res->bvh.node_ends == NULL) {
+        fprintf(stderr, "Error allocating device memory\n");
+        return NULL;
+    }
+    
+    return (void *)res;
+}
+
+extern "C" void cleanup_gpu(GPUResources *res) {
+    if (res) {
+        cudaFree(res->ray_origins);
+        cudaFree(res->ray_directions);
+        cudaFree(res->triangles);
+        cudaFree(res->colors);
+        cudaFree(res->pixel_seeds);
+        cudaFree(res->direct_colors);
+        cudaFree(res->did_hits);
+        cudaFree(res->hit_points);
+        cudaFree(res->bounce_dirs);
+
+        cudaFree(res->bvh.node_mins);
+        cudaFree(res->bvh.node_maxs);
+        cudaFree(res->bvh.node_lefts);
+        cudaFree(res->bvh.node_rights);
+        cudaFree(res->bvh.node_starts);
+        cudaFree(res->bvh.node_ends);
+
+        delete res;
+    }
 }

@@ -46,9 +46,11 @@ class BVHData(ctypes.Structure):
         ("node_ends", ctypes.POINTER(ctypes.c_int32))
     ]
 
+        
 def wrapper(raytracer_lib):
     # Define argument types
     raytracer_lib.launchCastRays.argtypes = [
+        ctypes.c_void_p,
         np.ctypeslib.ndpointer(dtype=Vec3),
         np.ctypeslib.ndpointer(dtype=Vec3),
         np.ctypeslib.ndpointer(dtype=Vec3),
@@ -65,6 +67,7 @@ def wrapper(raytracer_lib):
     ]
         
     def cast_rays_gpu(
+        gpu_data,
         ray_origins,
         ray_directions,
         triangles,
@@ -76,12 +79,15 @@ def wrapper(raytracer_lib):
         n_rays = len(ray_origins)
         n_triangles = len(triangles)//3
         
-        direct_colors = np.zeros(n_rays, dtype=Vec3)
-        did_hits = np.zeros(n_rays, dtype=np.bool_)
-        hit_points = np.zeros(n_rays, dtype=Vec3)
-        bounce_dirs = np.zeros(n_rays, dtype=Vec3)
+        # empty arrays to store results
+        # do not need to initialize as they will be filled by the GPU
+        direct_colors = np.empty(n_rays, dtype=Vec3)
+        did_hits = np.empty(n_rays, dtype=np.bool_)
+        hit_points = np.empty(n_rays, dtype=Vec3)
+        bounce_dirs = np.empty(n_rays, dtype=Vec3)
         
         raytracer_lib.launchCastRays(
+            gpu_data,
             ray_origins,
             ray_directions,
             triangles,
@@ -99,8 +105,67 @@ def wrapper(raytracer_lib):
         
         return direct_colors, did_hits, hit_points, bounce_dirs
 
-    return cast_rays_gpu
+    # returns pointer 
+    raytracer_lib.initialize_gpu.restype = ctypes.c_void_p
+    raytracer_lib.initialize_gpu.argtypes = [
+        ctypes.c_size_t,
+        ctypes.c_size_t,
+        ctypes.c_size_t
+    ]
+    
+    def initialize_gpu(
+        n_rays,
+        n_triangles,
+        n_bvh_nodes
+    ):
+        result = raytracer_lib.initialize_gpu(n_rays, n_triangles, n_bvh_nodes)
+        # if result was null, throw exception
+        if result is None:
+            raise RuntimeError("Failed to initialize GPU data")
 
+        return result
+    
+    raytracer_lib.cleanup_gpu.argtypes = [
+        ctypes.c_void_p
+    ]
+    def cleanup_gpu(
+        gpu_data
+    ):
+        raytracer_lib.cleanup_gpu(gpu_data)
+        
+    return initialize_gpu, cleanup_gpu, cast_rays_gpu
+
+
+class GPURaytracer:
+    def __init__(self, n_rays, n_triangles, n_bvh_nodes):
+        
+        # Compile the GPU library
+        self.lib = compile_lib('./example-solutions/raytracer.cu')
+        if self.lib is None:
+            print("GPU implementation not available")
+            return
+        
+        # Wrap the functions
+        self.init_func, self.cleanup_func, self.cast_rays_func = wrapper(self.lib)
+        
+        # Initialize the GPU data
+        self.gpu_data = self.init_func(n_rays, n_triangles, n_bvh_nodes)
+        
+        # check to make sure the GPU data was initialized
+        if self.gpu_data is None:
+            print("GPU data not initialized")
+            return
+        
+    def __del__(self):
+        if hasattr(self, 'cleanup_func'):
+            self.cleanup_func(self.gpu_data)
+            
+    def cast_rays(self, *args, **kwargs):
+        return self.cast_rays_func(
+            self.gpu_data, *args, **kwargs
+        )
+        
+        
 def create_rays_vectorized(width, height, aspect_ratio):
     # Create coordinate grids
     x = np.linspace(0.5/width, 1 - 0.5/width, width) * 2 - 1
@@ -119,7 +184,7 @@ class Scene:
         self.colors = colors
         self.bvh_data = BVH(triangles, max_triangles_in_node).flatten()
     
-    def render(self, width, height, camera_pos, cast_rays_func, ray_dir=None):
+    def render(self, width, height, camera_pos, raytracer, ray_dir=None):
         
         aspect_ratio = width / height
         
@@ -155,7 +220,7 @@ class Scene:
         )
         
         # Cast all primary rays
-        primary_colors, did_hits, hit_points, bounce_dirs = cast_rays_func(
+        primary_colors, did_hits, hit_points, bounce_dirs = raytracer.cast_rays(
             ray_org, ray_dir, triangles, colors, bvh_data, 0, px_seed
         )
         
@@ -175,7 +240,7 @@ class Scene:
             secondary_directions = fast_convert_to_vec3(secondary_directions)
             
             # Cast secondary rays
-            secondary_colors, _, _, _ = cast_rays_func(
+            secondary_colors, _, _, _ = raytracer.cast_rays(
                 secondary_origins, 
                 secondary_directions,
                 triangles, 
@@ -226,21 +291,17 @@ def eval():
     colors = np.concatenate([colors_ground, colors_object])
 
     scene = Scene(tris, colors, max_triangles_in_node=8)
-
-    # gpu library 
-    lib = compile_lib('./example-solutions/raytracer.cu')
-    if lib is None:
-        print("GPU implementation not available")
-        return
     
-    cast_rays_func = wrapper(lib)
+    width, height = 1600, 1200
+
+    raytracer = GPURaytracer(width*height, len(tris), len(scene.bvh_data[1]))
+    
     #cast_rays_func = cast_rays
     
     # Render the scene
-    width, height = 1600, 1200
     print("Rendering scene...")
     camera_pos = np.array([0., 1., -3.])
-    image0 = scene.render(width, height, camera_pos, cast_rays_func)
+    image0 = scene.render(width, height, camera_pos, raytracer)
     image_accum = np.clip(image0, 0, 1)
     #print("Rescene.ndering scene...")
     #image1 = scene.render(width, height, np.array([0., 1.2, -3.]))
@@ -266,7 +327,7 @@ def eval():
         ray_dir = create_rays_vectorized(width, height, width / height)
         # randomly perturb ray direction for anti-aliasing
         ray_dir += np.random.uniform(-0.001, 0.001, (n_rays, 3))
-        image_accum += scene.render(width, height, np.array([0., 1., -3.]), cast_rays_func, ray_dir)
+        image_accum += scene.render(width, height, np.array([0., 1., -3.]), raytracer, ray_dir)
     image_accum *= (1.0/128.0)
     # clip to 0-1 range
     image_accum = np.clip(image_accum, 0, 1)
