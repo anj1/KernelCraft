@@ -1,338 +1,217 @@
+# gpu_kernel_eval/kernels/raytracer/evaluation.py
 
 import numpy as np
-import numpy.typing as npt 
 import matplotlib.pyplot as plt
-from tasks.raytracer.bvh import BVH
-import ctypes 
+from pathlib import Path
+from typing import Optional, Tuple, Union
+import time
 
-from core.compile import compile_lib
+from .wrapper import RaytracerKernel
+from .scene import Scene, create_rays_vectorized
+from .ply import load_ply_triangles
+#from .reference import cast_rays as cast_rays_cpu
 
-from tasks.raytracer.ply import load_ply_triangles
-from tasks.raytracer.reference import Vec3, cast_rays
-
-# Fast conversion function
-def fast_convert_to_vec3(arr):
-    vec3_dtype = np.dtype([('x', 'f4'), ('y', 'f4'), ('z', 'f4')])
-    
-    # Ensure input is float32 to match Vec3's c_float
-    arr = arr.astype(np.float32)
-    
-    # Create structured array
-    structured = np.empty(arr.shape[0], dtype=vec3_dtype)
-    structured['x'] = arr[:, 0]
-    structured['y'] = arr[:, 1]
-    structured['z'] = arr[:, 2]
-    
-    # Convert to Vec3 array using frombuffer
-    return np.frombuffer(structured.tobytes(), dtype=np.dtype(Vec3)).copy()
-
-def fast_convert_from_vec3(arr):
-    vec3_dtype = np.dtype([('x', 'f4'), ('y', 'f4'), ('z', 'f4')])
-    
-    # Create structured array
-    structured = np.frombuffer(arr.tobytes(), dtype=vec3_dtype)
-    
-    # Convert to regular array
-    return np.stack([structured['x'], structured['y'], structured['z']], axis=-1)
-
-class BVHData(ctypes.Structure):
-    _fields_ = [
-        ("n_nodes", ctypes.c_size_t),
-        ("node_mins", ctypes.POINTER(Vec3)),
-        ("node_maxs", ctypes.POINTER(Vec3)),
-        ("node_lefts", ctypes.POINTER(ctypes.c_int32)),
-        ("node_rights", ctypes.POINTER(ctypes.c_int32)),
-        ("node_starts", ctypes.POINTER(ctypes.c_int32)),
-        ("node_ends", ctypes.POINTER(ctypes.c_int32))
-    ]
-
+class RaytracerEvaluator:
+    def __init__(self, 
+                 width: int = 1600, 
+                 height: int = 1200,
+                 max_triangles_in_node: int = 8,
+                 output_dir: Optional[Union[str, Path]] = None):
+        """
+        Initialize raytracer evaluator
         
-def wrapper(raytracer_lib):
-    # Define argument types
-    raytracer_lib.launchCastRays.argtypes = [
-        ctypes.c_void_p,
-        np.ctypeslib.ndpointer(dtype=Vec3),
-        np.ctypeslib.ndpointer(dtype=Vec3),
-        np.ctypeslib.ndpointer(dtype=Vec3),
-        np.ctypeslib.ndpointer(dtype=Vec3),
-        BVHData,
-        ctypes.c_int,
-        np.ctypeslib.ndpointer(dtype=ctypes.c_float),
-        np.ctypeslib.ndpointer(dtype=Vec3),
-        np.ctypeslib.ndpointer(dtype=np.bool_),
-        np.ctypeslib.ndpointer(dtype=Vec3),
-        np.ctypeslib.ndpointer(dtype=Vec3),
-        ctypes.c_size_t,
-        ctypes.c_size_t
-    ]
+        Args:
+            width: Image width
+            height: Image height
+            max_triangles_in_node: Max triangles per BVH node
+            output_dir: Directory for saving results
+        """
+        self.width = width
+        self.height = height
+        self.max_triangles_in_node = max_triangles_in_node
+        self.output_dir = Path(output_dir) if output_dir else Path.cwd() / "results"
+        self.output_dir.mkdir(exist_ok=True)
         
-    def cast_rays_gpu(
-        gpu_data,
-        ray_origins,
-        ray_directions,
-        triangles,
-        colors,
-        bvh,
-        depth,
-        pixel_seeds
-    ):
-        n_rays = len(ray_origins)
-        n_triangles = len(triangles)//3
+        # Load scene data
+        self.scene = self._load_scene()
         
-        # empty arrays to store results
-        # do not need to initialize as they will be filled by the GPU
-        direct_colors = np.empty(n_rays, dtype=Vec3)
-        did_hits = np.empty(n_rays, dtype=np.bool_)
-        hit_points = np.empty(n_rays, dtype=Vec3)
-        bounce_dirs = np.empty(n_rays, dtype=Vec3)
-        
-        raytracer_lib.launchCastRays(
-            gpu_data,
-            ray_origins,
-            ray_directions,
-            triangles,
-            colors,
-            bvh,
-            depth,
-            pixel_seeds,
-            direct_colors,
-            did_hits,
-            hit_points,
-            bounce_dirs,
-            n_rays,
-            n_triangles
+        # Initialize GPU implementation
+        self.gpu_raytracer = RaytracerKernel()
+        self.gpu_raytracer.initialize(
+            width * height,
+            len(self.scene.triangles),
+            self.scene.bvh_data["n_nodes"]
         )
         
-        return direct_colors, did_hits, hit_points, bounce_dirs
-
-    # returns pointer 
-    raytracer_lib.initialize_gpu.restype = ctypes.c_void_p
-    raytracer_lib.initialize_gpu.argtypes = [
-        ctypes.c_size_t,
-        ctypes.c_size_t,
-        ctypes.c_size_t
-    ]
-    
-    def initialize_gpu(
-        n_rays,
-        n_triangles,
-        n_bvh_nodes
-    ):
-        result = raytracer_lib.initialize_gpu(n_rays, n_triangles, n_bvh_nodes)
-        # if result was null, throw exception
-        if result is None:
-            raise RuntimeError("Failed to initialize GPU data")
-
-        return result
-    
-    raytracer_lib.cleanup_gpu.argtypes = [
-        ctypes.c_void_p
-    ]
-    def cleanup_gpu(
-        gpu_data
-    ):
-        raytracer_lib.cleanup_gpu(gpu_data)
+        self.cpu_raytracer = self.gpu_raytracer # TODO: Replace with CPU implementation
         
-    return initialize_gpu, cleanup_gpu, cast_rays_gpu
-
-
-class GPURaytracer:
-    def __init__(self, n_rays, n_triangles, n_bvh_nodes):
-        
-        # Compile the GPU library
-        self.lib = compile_lib('./example-solutions/raytracer.cu')
-        if self.lib is None:
-            print("GPU implementation not available")
-            return
-        
-        # Wrap the functions
-        self.init_func, self.cleanup_func, self.cast_rays_func = wrapper(self.lib)
-        
-        # Initialize the GPU data
-        self.gpu_data = self.init_func(n_rays, n_triangles, n_bvh_nodes)
-        
-        # check to make sure the GPU data was initialized
-        if self.gpu_data is None:
-            print("GPU data not initialized")
-            return
-        
-    def __del__(self):
-        if hasattr(self, 'cleanup_func'):
-            self.cleanup_func(self.gpu_data)
+    def _load_scene(self) -> Scene:
+        """Load and prepare scene data"""
+        # Load ground plane
+        with open('./tasks/raytracer/assets/ground.ply', 'rb') as f:
+            tris_ground = load_ply_triangles(f)
             
-    def cast_rays(self, *args, **kwargs):
-        return self.cast_rays_func(
-            self.gpu_data, *args, **kwargs
-        )
+        # Load and transform bunny model    
+        with open('./tasks/raytracer/assets/bunny.ply', 'rb') as f:
+            tris_object = 15 * load_ply_triangles(f) * [1, -1, 1]
+            # Place on ground plane
+            tris_object += [0, -np.min(tris_object[:, 1]) - 2, 0]
+            
+        # Combine meshes
+        triangles = np.concatenate([tris_ground, tris_object])
         
+        # Setup colors
+        colors_ground = np.array([
+            [1.0, 0.4, 0.4],
+            [0.4, 0.4, 1.0]
+        ])
+        colors_object = np.ones((len(tris_object), 3))
+        colors = np.concatenate([colors_ground, colors_object])
         
-def create_rays_vectorized(width, height, aspect_ratio):
-    # Create coordinate grids
-    x = np.linspace(0.5/width, 1 - 0.5/width, width) * 2 - 1
-    y = np.linspace(1 - 0.5/height, 0.5/height, height) * 2 - 1
-    
-    xx, yy = np.meshgrid(x * aspect_ratio, y)
-    
-    rays = np.stack([xx.ravel(), yy.ravel(), np.ones(width * height)], axis=1)
-    rays /= np.linalg.norm(rays, axis=1)[:, np.newaxis]
-    
-    return rays
-
-class Scene:
-    def __init__(self, triangles, colors, max_triangles_in_node=8):
-        self.triangles = triangles
-        self.colors = colors
-        self.bvh_data = BVH(triangles, max_triangles_in_node).flatten()
-    
-    def render(self, width, height, camera_pos, raytracer, ray_dir=None):
+        return Scene(triangles, colors, self.max_triangles_in_node)
         
-        aspect_ratio = width / height
+    def render_single(self, 
+                     implementation: str = 'gpu',
+                     camera_pos: Optional[np.ndarray] = None) -> Tuple[np.ndarray, float]:
+        """
+        Render single image using specified implementation
         
-        # Generate all primary rays
-        n_rays = width * height
+        Args:
+            implementation: 'gpu' or 'cpu'
+            camera_pos: Optional camera position override
+            
+        Returns:
+            Tuple of (rendered image, render time in seconds)
+        """
+        if camera_pos is None:
+            camera_pos = np.array([0., 1., -3.])
+            
+        n_rays = self.width * self.height
         ray_org = np.tile(camera_pos, (n_rays, 1))
-        px_seed = np.random.rand(n_rays).astype(np.float32) # TODO: set random seeds
-                
-        if ray_dir is None:
-            #ray_dir = np.zeros((n_rays, 3))
-            #create_rays(width, height, ray_dir, aspect_ratio)
-            ray_dir = create_rays_vectorized(width, height, aspect_ratio)
-
-        # convert arrays to Vec3 to remove overhead
-        ray_org = fast_convert_to_vec3(ray_org)
-        ray_dir = fast_convert_to_vec3(ray_dir)
-        triangles = fast_convert_to_vec3(np.reshape(self.triangles, (-1, 3)))
-        colors = fast_convert_to_vec3(self.colors)
+        ray_dir = create_rays_vectorized(self.width, self.height, self.width / self.height)
+        px_seed = np.random.rand(n_rays).astype(np.float32)
         
-        # convert BVH data to ctypes struct
-        # our tuple is:
-        # (node_mins, node_maxs, node_lefts, node_rights, node_starts, node_ends)
-        node_mins_v3 = fast_convert_to_vec3(self.bvh_data[1])
-        node_maxs_v3 = fast_convert_to_vec3(self.bvh_data[2])
-        bvh_data = BVHData(
-            len(node_mins_v3),
-            node_mins_v3.ctypes.data_as(ctypes.POINTER(Vec3)),
-            node_maxs_v3.ctypes.data_as(ctypes.POINTER(Vec3)),
-            self.bvh_data[3].ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
-            self.bvh_data[4].ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
-            self.bvh_data[5].ctypes.data_as(ctypes.POINTER(ctypes.c_int32)),
-            self.bvh_data[6].ctypes.data_as(ctypes.POINTER(ctypes.c_int32))
-        )
+        start_time = time.perf_counter()
         
-        # Cast all primary rays
-        primary_colors, did_hits, hit_points, bounce_dirs = raytracer.cast_rays(
-            ray_org, ray_dir, triangles, colors, bvh_data, 0, px_seed
-        )
-        
-        primary_colors = fast_convert_from_vec3(primary_colors)
-        hit_points = fast_convert_from_vec3(hit_points)
-        bounce_dirs = fast_convert_from_vec3(bounce_dirs)
-                
-        # Prepare secondary rays where we had hits
-        hit_mask = did_hits
-        if np.any(hit_mask):
-            # Offset hit points slightly along bounce direction to avoid self-intersection
-            secondary_origins = hit_points[hit_mask] + bounce_dirs[hit_mask] * 0.001
-            secondary_directions = bounce_dirs[hit_mask]
-            secondary_seeds = px_seed[hit_mask]
-            
-            secondary_origins = fast_convert_to_vec3(secondary_origins)
-            secondary_directions = fast_convert_to_vec3(secondary_directions)
-            
-            # Cast secondary rays
-            secondary_colors, _, _, _ = raytracer.cast_rays(
-                secondary_origins, 
-                secondary_directions,
-                triangles, 
-                colors,
-                bvh_data,
-                1,
-                secondary_seeds
+        if implementation == 'gpu':
+            image = self.scene.render(
+                self.width, self.height,
+                camera_pos,
+                self.gpu_raytracer,
+                ray_dir
             )
-            secondary_colors = fast_convert_from_vec3(secondary_colors)
-            
-            # Combine primary and secondary colors where we had hits
-            final_colors = primary_colors.copy()
-            final_colors[hit_mask] = primary_colors[hit_mask] * 0.7 + secondary_colors * 0.3
         else:
-            final_colors = primary_colors
+            image = self.scene.render(
+                self.width, self.height,
+                camera_pos,
+                self.cpu_raytracer,
+                ray_dir
+            )
+            
+        render_time = time.perf_counter() - start_time
         
-        # Reshape into image
-        return np.clip(final_colors.reshape(height, width, 3), 0, 1)
-
-def eval():
-    #tris_ground = obj_to_triangles(open('./tasks/raytracer/assets/ground.obj').read())
-    #tris_object = obj_to_triangles(open('./tasks/raytracer/assets/pyramid.obj').read())
-    #tris_object = obj_to_triangles(open('./tasks/raytracer/assets/cube.obj').read())
-    #tris_object = 15*obj_to_triangles(open('./tasks/raytracer/assets/bunny.obj').read())
-    
-    with open('./tasks/raytracer/assets/ground.ply', 'rb') as f:
-        tris_ground = load_ply_triangles(f)
-    
-    with open('./tasks/raytracer/assets/bunny.ply', 'rb') as f:
-        #tris_object = load_ply_triangles(f)
-        tris_object = 15*load_ply_triangles(f)*[1,-1,1] 
+        return np.clip(image, 0, 1), render_time
         
-    # translate object so that it sits on the ground plane
-    tris_object += np.array([0, -np.min(tris_object[:, 1])-2, 0])
-    
-    tris = np.concatenate([tris_ground, tris_object])
-    
-    colors_ground = np.array([
-        [1.0, 0.4, 0.4],  # Ground - light gray
-        [0.4, 0.4, 1.0],  # Ground - light gray
-    ])
-    
-    colors_object = np.zeros((len(tris_object), 3))
-    colors_object[:, 0] = 1.0
-    colors_object[:, 1] = 1.0
-    colors_object[:, 2] = 1.0
-    
-    colors = np.concatenate([colors_ground, colors_object])
+    def render_multisampled(self,
+                          n_samples: int = 128,
+                          implementation: str = 'gpu',
+                          camera_pos: Optional[np.ndarray] = None) -> Tuple[np.ndarray, float]:
+        """
+        Render with multisampling for anti-aliasing
+        
+        Args:
+            n_samples: Number of samples per pixel
+            implementation: 'gpu' or 'cpu'
+            camera_pos: Optional camera position override
+            
+        Returns:
+            Tuple of (rendered image, total render time in seconds)
+        """
+        if camera_pos is None:
+            camera_pos = np.array([0., 1., -3.])
+            
+        image_accum = np.zeros((self.height, self.width, 3), dtype=np.float32)
+        total_time = 0
+        
+        for i in range(n_samples):
+            n_rays = self.width * self.height
+            ray_dir = create_rays_vectorized(self.width, self.height, self.width / self.height)
+            # Add jitter for anti-aliasing
+            ray_dir += np.random.uniform(-0.001, 0.001, (n_rays, 3))
+            
+            image, render_time = self.render_single(implementation, camera_pos)
+            image_accum += image
+            total_time += render_time
+            
+            if (i + 1) % 10 == 0:
+                print(f"Completed {i + 1}/{n_samples} samples")
+                
+        return np.clip(image_accum / n_samples, 0, 1), total_time
+        
+    def run_comparison(self,
+                      n_samples: int = 128,
+                      save_results: bool = True) -> None:
+        """Run full comparison between GPU and CPU implementations"""
+        print("Rendering single sample comparison...")
+        
+        # Single sample comparison
+        gpu_image, gpu_time = self.render_single('gpu')
+        cpu_image, cpu_time = self.render_single('cpu')
+        
+        print(f"Single sample render times:")
+        print(f"  GPU: {gpu_time:.3f}s")
+        print(f"  CPU: {cpu_time:.3f}s")
+        print(f"  Speedup: {cpu_time/gpu_time:.1f}x")
+        
+        # Compute difference
+        diff = np.abs(gpu_image - cpu_image)
+        max_diff = np.max(diff)
+        mean_diff = np.mean(diff)
+        print(f"\nOutput differences:")
+        print(f"  Max pixel difference: {max_diff:.6f}")
+        print(f"  Mean pixel difference: {mean_diff:.6f}")
+        
+        if save_results:
+            plt.imsave(self.output_dir / 'single_gpu.png', gpu_image)
+            plt.imsave(self.output_dir / 'single_cpu.png', cpu_image)
+            #plt.imsave(self.output_dir / 'single_diff.png', diff * 10)  # Multiply for visibility
+            
+        # Multisampled comparison
+        print(f"\nRendering {n_samples} sample comparison...")
+        
+        gpu_ms_image, gpu_ms_time = self.render_multisampled(n_samples, 'gpu')
+        cpu_ms_image, cpu_ms_time = self.render_multisampled(n_samples, 'cpu')
+        
+        print(f"\nMultisampled render times:")
+        print(f"  GPU: {gpu_ms_time:.3f}s")
+        print(f"  CPU: {cpu_ms_time:.3f}s")
+        print(f"  Speedup: {cpu_ms_time/gpu_ms_time:.1f}x")
+        
+        # Compute difference
+        ms_diff = np.abs(gpu_ms_image - cpu_ms_image)
+        ms_max_diff = np.max(ms_diff)
+        ms_mean_diff = np.mean(ms_diff)
+        print(f"\nMultisampled output differences:")
+        print(f"  Max pixel difference: {ms_max_diff:.6f}")
+        print(f"  Mean pixel difference: {ms_mean_diff:.6f}")
+        
+        if save_results:
+            plt.imsave(self.output_dir / 'ms_gpu.png', gpu_ms_image)
+            plt.imsave(self.output_dir / 'ms_cpu.png', cpu_ms_image)
+            plt.imsave(self.output_dir / 'ms_diff.png', ms_diff * 10)
+            
+    def cleanup(self):
+        """Release GPU resources"""
+        if hasattr(self, 'gpu_raytracer'):
+            self.gpu_raytracer.cleanup()
 
-    scene = Scene(tris, colors, max_triangles_in_node=8)
-    
-    width, height = 1600, 1200
+def main():
+    """Main evaluation entry point"""
+    try:
+        evaluator = RaytracerEvaluator()
+        evaluator.run_comparison()
+    finally:
+        evaluator.cleanup()
 
-    raytracer = GPURaytracer(width*height, len(tris), len(scene.bvh_data[1]))
-    
-    #cast_rays_func = cast_rays
-    
-    # Render the scene
-    print("Rendering scene...")
-    camera_pos = np.array([0., 1., -3.])
-    image0 = scene.render(width, height, camera_pos, raytracer)
-    image_accum = np.clip(image0, 0, 1)
-    #print("Rescene.ndering scene...")
-    #image1 = scene.render(width, height, np.array([0., 1.2, -3.]))
-
-    # Display the result
-    plt.figure(figsize=(10, 7.5))
-    plt.imshow(image0)
-    plt.axis('off')
-    plt.show()
-
-    # Save the result
-    plt.imsave('raytracing0.png', image0)
-    #plt.imsave('raytracing1.png', image1)
-    
-    # Now render 100 times and average
-    print("Rendering scene 100 times...")
-    image_accum = np.zeros((height, width, 3), dtype=np.float32)
-    for i in range(128):
-        n_rays = width * height
-        #ray_dir = np.zeros((n_rays, 3))
-        px_seed = np.random.rand(n_rays).astype(np.float32) # TODO: set random seeds  
-        #create_rays(width, height, ray_dir, width / height)
-        ray_dir = create_rays_vectorized(width, height, width / height)
-        # randomly perturb ray direction for anti-aliasing
-        ray_dir += np.random.uniform(-0.001, 0.001, (n_rays, 3))
-        image_accum += scene.render(width, height, np.array([0., 1., -3.]), raytracer, ray_dir)
-    image_accum *= (1.0/128.0)
-    # clip to 0-1 range
-    image_accum = np.clip(image_accum, 0, 1)
-    
-    plt.imsave('raytracing1.png', image_accum)
-    
 if __name__ == "__main__":
-    eval()
+    main()

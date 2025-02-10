@@ -113,12 +113,12 @@ class BVH:
         node_starts = np.array([node.start for node in nodes]).astype(np.int32)
         node_ends = np.array([node.end for node in nodes]).astype(np.int32)
         
-        return (
-            len(nodes),
-            node_mins,
-            node_maxs,
-            node_lefts,
-            node_rights,
-            node_starts,
-            node_ends
-        )
+        return {
+            "n_nodes": len(nodes),
+            "node_mins": node_mins,
+            "node_maxs": node_maxs,
+            "node_lefts": node_lefts,
+            "node_rights": node_rights,
+            "node_starts": node_starts,
+            "node_ends": node_ends
+        }
