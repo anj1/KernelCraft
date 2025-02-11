@@ -3,14 +3,33 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import NamedTuple, Optional, Tuple, Union
+
 import time
 
 from .wrapper import RaytracerKernel
 from .scene import Scene, create_rays_vectorized
 from .ply import load_ply_triangles
-#from .reference import cast_rays as cast_rays_cpu
+from .reference import cast_rays as cast_rays_cpu
 
+class RaytracerKernelCPU:
+    def __init__(self):
+        pass
+            
+    def cast_rays(self,
+                 ray_origins: np.ndarray,
+                 ray_directions: np.ndarray,
+                 triangles: np.ndarray,
+                 colors: np.ndarray,
+                 bvh_data: NamedTuple,
+                 depth: int = 0,
+                 pixel_seeds: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Cast rays through the scene
+        """
+        return cast_rays_cpu(ray_origins, ray_directions, triangles, colors, bvh_data, depth, pixel_seeds)
+    
+    
 class RaytracerEvaluator:
     def __init__(self, 
                  width: int = 1600, 
@@ -40,10 +59,10 @@ class RaytracerEvaluator:
         self.gpu_raytracer.initialize(
             width * height,
             len(self.scene.triangles),
-            self.scene.bvh_data["n_nodes"]
+            len(self.scene.bvh_data.node_starts)
         )
         
-        self.cpu_raytracer = self.gpu_raytracer # TODO: Replace with CPU implementation
+        self.cpu_raytracer = RaytracerKernelCPU() # TODO: Replace with CPU implementation
         
     def _load_scene(self) -> Scene:
         """Load and prepare scene data"""
@@ -55,7 +74,7 @@ class RaytracerEvaluator:
         with open('./tasks/raytracer/assets/bunny.ply', 'rb') as f:
             tris_object = 15 * load_ply_triangles(f) * [1, -1, 1]
             # Place on ground plane
-            tris_object += [0, -np.min(tris_object[:, 1]) - 2, 0]
+            tris_object += [0, -np.min(tris_object[:, 1]) - 2.3, 0]
             
         # Combine meshes
         triangles = np.concatenate([tris_ground, tris_object])
@@ -71,6 +90,7 @@ class RaytracerEvaluator:
         return Scene(triangles, colors, self.max_triangles_in_node)
         
     def render_single(self, 
+                     px_seed,
                      implementation: str = 'gpu',
                      camera_pos: Optional[np.ndarray] = None) -> Tuple[np.ndarray, float]:
         """
@@ -89,7 +109,6 @@ class RaytracerEvaluator:
         n_rays = self.width * self.height
         ray_org = np.tile(camera_pos, (n_rays, 1))
         ray_dir = create_rays_vectorized(self.width, self.height, self.width / self.height)
-        px_seed = np.random.rand(n_rays).astype(np.float32)
         
         start_time = time.perf_counter()
         
@@ -98,6 +117,7 @@ class RaytracerEvaluator:
                 self.width, self.height,
                 camera_pos,
                 self.gpu_raytracer,
+                px_seed,
                 ray_dir
             )
         else:
@@ -105,6 +125,7 @@ class RaytracerEvaluator:
                 self.width, self.height,
                 camera_pos,
                 self.cpu_raytracer,
+                px_seed,
                 ray_dir
             )
             
@@ -139,7 +160,8 @@ class RaytracerEvaluator:
             # Add jitter for anti-aliasing
             ray_dir += np.random.uniform(-0.001, 0.001, (n_rays, 3))
             
-            image, render_time = self.render_single(implementation, camera_pos)
+            px_seed = np.random.rand(n_rays).astype(np.float32)
+            image, render_time = self.render_single(px_seed, implementation, camera_pos)
             image_accum += image
             total_time += render_time
             
@@ -155,8 +177,9 @@ class RaytracerEvaluator:
         print("Rendering single sample comparison...")
         
         # Single sample comparison
-        gpu_image, gpu_time = self.render_single('gpu')
-        cpu_image, cpu_time = self.render_single('cpu')
+        px_seed = np.zeros(self.width*self.height, dtype=np.float32)
+        gpu_image, gpu_time = self.render_single(px_seed, 'gpu')
+        cpu_image, cpu_time = self.render_single(px_seed, 'cpu')
         
         print(f"Single sample render times:")
         print(f"  GPU: {gpu_time:.3f}s")
@@ -164,12 +187,12 @@ class RaytracerEvaluator:
         print(f"  Speedup: {cpu_time/gpu_time:.1f}x")
         
         # Compute difference
-        diff = np.abs(gpu_image - cpu_image)
-        max_diff = np.max(diff)
-        mean_diff = np.mean(diff)
+        diff = gpu_image - cpu_image
+        max_diff = np.max(np.abs(diff))
+        rms_diff = np.sqrt(np.mean(diff ** 2))
         print(f"\nOutput differences:")
         print(f"  Max pixel difference: {max_diff:.6f}")
-        print(f"  Mean pixel difference: {mean_diff:.6f}")
+        print(f"  Root mean squared pixel difference: {rms_diff:.6f}")
         
         if save_results:
             plt.imsave(self.output_dir / 'single_gpu.png', gpu_image)
@@ -180,7 +203,11 @@ class RaytracerEvaluator:
         print(f"\nRendering {n_samples} sample comparison...")
         
         gpu_ms_image, gpu_ms_time = self.render_multisampled(n_samples, 'gpu')
+        if save_results:
+            plt.imsave(self.output_dir / 'ms_gpu.png', gpu_ms_image)
         cpu_ms_image, cpu_ms_time = self.render_multisampled(n_samples, 'cpu')
+        if save_results:
+            plt.imsave(self.output_dir / 'ms_cpu.png', cpu_ms_image)
         
         print(f"\nMultisampled render times:")
         print(f"  GPU: {gpu_ms_time:.3f}s")
@@ -194,11 +221,6 @@ class RaytracerEvaluator:
         print(f"\nMultisampled output differences:")
         print(f"  Max pixel difference: {ms_max_diff:.6f}")
         print(f"  Mean pixel difference: {ms_mean_diff:.6f}")
-        
-        if save_results:
-            plt.imsave(self.output_dir / 'ms_gpu.png', gpu_ms_image)
-            plt.imsave(self.output_dir / 'ms_cpu.png', cpu_ms_image)
-            plt.imsave(self.output_dir / 'ms_diff.png', ms_diff * 10)
             
     def cleanup(self):
         """Release GPU resources"""

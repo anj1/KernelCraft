@@ -20,14 +20,15 @@ class Scene:
         self.colors = colors
         self.bvh_data = BVH(triangles, max_triangles_in_node).flatten()
     
-    def render(self, width, height, camera_pos, raytracer, ray_dir=None):
+    def render(self, width, height, camera_pos, raytracer, px_seed=None, ray_dir=None):
         
         aspect_ratio = width / height
         
         # Generate all primary rays
         n_rays = width * height
         ray_org = np.tile(camera_pos, (n_rays, 1))
-        px_seed = np.random.rand(n_rays).astype(np.float32) # TODO: set random seeds
+        if px_seed is None:
+            px_seed = np.zeros(n_rays, dtype=np.float32)
                 
         if ray_dir is None:
             ray_dir = create_rays_vectorized(width, height, aspect_ratio)

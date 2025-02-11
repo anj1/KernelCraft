@@ -1,4 +1,5 @@
 import numpy as np 
+from typing import NamedTuple
 
 class AABB:
     def __init__(self, min_bound=None, max_bound=None):
@@ -35,6 +36,15 @@ class BVHNode:
 def compute_triangle_centroid(triangle):
     return np.mean(triangle, axis=0)
 
+class BVHFlat(NamedTuple):
+    """BVH data in a Numba-friendly format"""
+    node_mins: np.ndarray
+    node_maxs: np.ndarray
+    node_lefts: np.ndarray
+    node_rights: np.ndarray
+    node_starts: np.ndarray
+    node_ends: np.ndarray
+    
 class BVH:
     def __init__(self, triangles, max_triangles_in_node=2):
         self.triangles = triangles
@@ -113,12 +123,21 @@ class BVH:
         node_starts = np.array([node.start for node in nodes]).astype(np.int32)
         node_ends = np.array([node.end for node in nodes]).astype(np.int32)
         
-        return {
-            "n_nodes": len(nodes),
-            "node_mins": node_mins,
-            "node_maxs": node_maxs,
-            "node_lefts": node_lefts,
-            "node_rights": node_rights,
-            "node_starts": node_starts,
-            "node_ends": node_ends
-        }
+        # return {
+        #     "n_nodes": len(nodes),
+        #     "node_mins": node_mins,
+        #     "node_maxs": node_maxs,
+        #     "node_lefts": node_lefts,
+        #     "node_rights": node_rights,
+        #     "node_starts": node_starts,
+        #     "node_ends": node_ends
+        # }
+        # return as typed array instead
+        return BVHFlat(
+            node_mins,
+            node_maxs,
+            node_lefts,
+            node_rights,
+            node_starts,
+            node_ends
+        )

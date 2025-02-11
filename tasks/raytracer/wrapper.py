@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Tuple, Optional
 from dataclasses import dataclass
 from core.compiler import CUDACompiler
-
+from typing import NamedTuple
 @dataclass
 class Vec3(ctypes.Structure):
     """Vector3 structure matching CUDA implementation"""
@@ -179,7 +179,7 @@ class RaytracerKernel:
                  ray_directions: np.ndarray,
                  triangles: np.ndarray,
                  colors: np.ndarray,
-                 bvh_data: dict,
+                 bvh_data: NamedTuple,
                  depth: int = 0,
                  pixel_seeds: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -216,9 +216,9 @@ class RaytracerKernel:
         
         self._bvh_arrays = {}
         bvh = BVHData()
-        for field, value in bvh_data.items():
-            #print(field)
-            ptr, arr = fast_convert_to_ptr(value)
+        bvh.n_nodes = len(bvh_data.node_mins)
+        for field in bvh_data._fields:
+            ptr, arr = fast_convert_to_ptr(getattr(bvh_data, field))
             setattr(bvh, field, ptr)
             self._bvh_arrays[field] = arr
         
